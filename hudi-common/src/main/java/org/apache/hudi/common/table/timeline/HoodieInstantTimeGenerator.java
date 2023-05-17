@@ -144,4 +144,8 @@ public class HoodieInstantTimeGenerator {
       return false;
     }
   }
+
+  public static void resetLastInstantTime() {
+    lastInstantTime = new AtomicReference<>(String.valueOf(Integer.MIN_VALUE));
+  }
 }

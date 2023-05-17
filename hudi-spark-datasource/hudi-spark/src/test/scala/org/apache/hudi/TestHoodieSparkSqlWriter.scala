@@ -91,6 +91,7 @@ class TestHoodieSparkSqlWriter {
     cleanupSparkContexts()
     FileUtils.deleteDirectory(tempPath.toFile)
     FileUtils.deleteDirectory(tempBootStrapPath.toFile)
+    HoodieInstantTimeGenerator.resetLastInstantTime()
   }
 
   /**
@@ -1211,45 +1212,57 @@ class TestHoodieSparkSqlWriter {
     assert(exc.getMessage.contains("Consistent hashing bucket index does not work with COW table. Use simple bucket index or an MOR table."))
   }
 
-  /*
+  /**
    * Test case for instant is generated with commit timezone when TIMELINE_TIMEZONE set to UTC
    * related to HUDI-5978
-   */
+   * */
   @Test
   def testInsertDatasetWIthTimelineTimezoneUTC(): Unit = {
-    val fooTableModifier = commonTableModifier.updated(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL)
-      .updated(DataSourceWriteOptions.INSERT_DROP_DUPS.key, "false")
-      .updated(HoodieTableConfig.TIMELINE_TIMEZONE.key, "UTC") // utc timezone
+    val originTimezone = TimeZone.getDefault
+        try {
+          val fooTableModifier = Map("path" -> tempBasePath,
+            HoodieBootstrapConfig.BASE_PATH.key -> tempBasePath,
+            HoodieWriteConfig.TBL_NAME.key -> "hoodie_timeline_timezone_foo_tbl",
+            DataSourceWriteOptions.TABLE_TYPE.key -> "MERGE_ON_READ",
+            HoodieBootstrapConfig.PARALLELISM_VALUE.key -> "4",
+            DataSourceWriteOptions.OPERATION.key -> DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
+            DataSourceWriteOptions.RECORDKEY_FIELD.key -> "_row_key",
+            DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "partition",
+            HoodieBootstrapConfig.KEYGEN_CLASS_NAME.key -> classOf[NonpartitionedKeyGenerator].getCanonicalName,
+            HoodieTableConfig.TIMELINE_TIMEZONE.key -> "UTC")
 
-    // generate the inserts
-    val schema = DataSourceTestUtils.getStructTypeExampleSchema
-    val structType = AvroConversionUtils.convertAvroSchemaToStructType(schema)
-    val records = DataSourceTestUtils.generateRandomRows(100)
-    val recordsSeq = convertRowListToSeq(records)
-    val df = spark.createDataFrame(sc.parallelize(recordsSeq), structType)
+          // generate the inserts
+          val schema = DataSourceTestUtils.getStructTypeExampleSchema
+          val structType = AvroConversionUtils.convertAvroSchemaToStructType(schema)
+          val records = DataSourceTestUtils.generateRandomRows(100)
+          val recordsSeq = convertRowListToSeq(records)
+          val df = spark.createDataFrame(sc.parallelize(recordsSeq), structType)
 
-    // get UTC instant before write
-    val beforeWriteInstant = Instant.now()
+          // get UTC instant before write
+          val beforeWriteInstant = Instant.now()
 
-    // set local timezone to America/Los_Angeles(UTC-7)
-    TimeZone.setDefault(TimeZone.getTimeZone("America/Los_Angeles"))
+          // set local timezone to America/Los_Angeles(UTC-7)
+          TimeZone.setDefault(TimeZone.getTimeZone("America/Los_Angeles"))
 
-    // write to Hudi
-    val (success, writeInstantTimeOpt, _, _, _, hoodieTableConfig) = HoodieSparkSqlWriter.write(sqlContext, SaveMode.Append, fooTableModifier, df)
-    assertTrue(success)
-    val hoodieTableTimelineTimezone = HoodieTimelineTimeZone.valueOf(hoodieTableConfig.getString(HoodieTableConfig.TIMELINE_TIMEZONE))
-    assertEquals(hoodieTableTimelineTimezone, HoodieTimelineTimeZone.UTC)
+          // write to Hudi
+          val (success, writeInstantTimeOpt, _, _, _, hoodieTableConfig) = HoodieSparkSqlWriter.write(sqlContext, SaveMode.Append, fooTableModifier, df)
+          assertTrue(success)
+          val hoodieTableTimelineTimezone = HoodieTimelineTimeZone.valueOf(hoodieTableConfig.getString(HoodieTableConfig.TIMELINE_TIMEZONE))
+          assertEquals(hoodieTableTimelineTimezone, HoodieTimelineTimeZone.UTC)
 
-    val utcFormatter = new DateTimeFormatterBuilder()
-      .appendPattern(HoodieInstantTimeGenerator.SECS_INSTANT_TIMESTAMP_FORMAT)
-      .appendValue(ChronoField.MILLI_OF_SECOND, 3)
-      .toFormatter
-      .withZone(ZoneId.of("UTC"))
-    // instant parsed by UTC timezone
-    val writeInstant = Instant.from(utcFormatter.parse(writeInstantTimeOpt.get()))
+          val utcFormatter = new DateTimeFormatterBuilder()
+            .appendPattern(HoodieInstantTimeGenerator.SECS_INSTANT_TIMESTAMP_FORMAT)
+            .appendValue(ChronoField.MILLI_OF_SECOND, 3)
+            .toFormatter
+            .withZone(ZoneId.of("UTC"))
+          // instant parsed by UTC timezone
+          val writeInstant = Instant.from(utcFormatter.parse(writeInstantTimeOpt.get()))
 
-    assertTrue(beforeWriteInstant.toEpochMilli < writeInstant.toEpochMilli,
-      s"writeInstant(${writeInstant.toEpochMilli}) must always be greater than beforeWriteInstant(${beforeWriteInstant.toEpochMilli}) if writeInstant was generated with UTC timezone")
+          assertTrue(beforeWriteInstant.toEpochMilli < writeInstant.toEpochMilli,
+            s"writeInstant(${writeInstant.toEpochMilli}) must always be greater than beforeWriteInstant(${beforeWriteInstant.toEpochMilli}) if writeInstant was generated with UTC timezone")
+        } finally {
+          TimeZone.setDefault(originTimezone)
+        }
   }
 
   private def fetchActualSchema(): Schema = {
